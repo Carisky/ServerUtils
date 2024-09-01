@@ -1,14 +1,13 @@
 package com.example.serverutils;
 
-import com.mojang.datafixers.types.templates.List;
 import com.mojang.logging.LogUtils;
-
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -21,18 +20,17 @@ public class ServerUtils {
     public static final String MODID = "serverutils";
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Set<EntityType<?>> BLACKLIST = new HashSet<>();
-    
-    // Период очистки в тиках (5 минут = 6000 тиков)
-    private static final int CLEAR_INTERVAL_TICKS = 6000;
-    private int ticksElapsed = 0;
 
-    private static final int WARNING_INTERVAL_TICKS_5MIN = 6000 * 5; // 5 минут
-    private static final int WARNING_INTERVAL_TICKS_1MIN = 6000 * 1; // 1 минута
-    private static final int WARNING_INTERVAL_TICKS_5SEC = 100;
+    // Интервалы в миллисекундах
+    private static final long CLEAR_INTERVAL_MILLIS = 5 * 60 * 1000; // 5 минут
+    private static final long WARNING_INTERVAL_MILLIS_5MIN = 5 * 60 * 1000; // 5 минут
+    private static final long WARNING_INTERVAL_MILLIS_1MIN = 60 * 1000; // 1 минута
+    private static final long WARNING_INTERVAL_MILLIS_5SEC = 5 * 1000; // 5 секунд
 
-    private int ticksUntilNextWarning_5Min = WARNING_INTERVAL_TICKS_5MIN;
-    private int ticksUntilNextWarning_1Min = WARNING_INTERVAL_TICKS_1MIN;
-    private int ticksUntilNextWarning_5Sec = WARNING_INTERVAL_TICKS_5SEC;
+    private long lastClearTime = 0;
+    private long lastWarning5MinTime = 0;
+    private long lastWarning1MinTime = 0;
+    private long lastWarning5SecTime = 0;
 
     public ServerUtils() {
         BLACKLIST.add(EntityType.PLAYER);
@@ -46,63 +44,74 @@ public class ServerUtils {
         BLACKLIST.add(EntityType.ENDER_PEARL);
         BLACKLIST.add(EntityType.EYE_OF_ENDER);
         BLACKLIST.add(EntityType.END_CRYSTAL);
+        BLACKLIST.add(EntityType.WARDEN);
+
 
         MinecraftForge.EVENT_BUS.register(this);
+        lastClearTime = System.currentTimeMillis();
     }
 
     @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
-            ticksElapsed++;
-    
-            if (ticksElapsed >= CLEAR_INTERVAL_TICKS) {
-                ticksElapsed = 0; // Сброс счётчика тиков
-    
-                MinecraftServer server = event.getServer();
-                for (ServerLevel world : server.getAllLevels()) {
-                    // Отправляем предупреждения о предстоящей очистке
-                    if (ticksUntilNextWarning_5Min <= CLEAR_INTERVAL_TICKS) {
-                        sendWarningToPlayers(world, "Entity cleanup will start in 5 minutes!");
-                        ticksUntilNextWarning_5Min = WARNING_INTERVAL_TICKS_5MIN; // Сброс таймера
-                    } else {
-                        ticksUntilNextWarning_5Min -= CLEAR_INTERVAL_TICKS;
-                    }
-    
-                    if (ticksUntilNextWarning_1Min <= CLEAR_INTERVAL_TICKS) {
-                        sendWarningToPlayers(world, "Entity cleanup will start in 1 minute!");
-                        ticksUntilNextWarning_1Min = WARNING_INTERVAL_TICKS_1MIN; // Сброс таймера
-                    } else {
-                        ticksUntilNextWarning_1Min -= CLEAR_INTERVAL_TICKS;
-                    }
-    
-                    if (ticksUntilNextWarning_5Sec <= CLEAR_INTERVAL_TICKS) {
-                        sendWarningToPlayers(world, "Entity cleanup will start in 5 seconds!");
-                        ticksUntilNextWarning_5Sec = WARNING_INTERVAL_TICKS_5SEC; // Сброс таймера
-                    } else {
-                        ticksUntilNextWarning_5Sec -= CLEAR_INTERVAL_TICKS;
-                    }
-    
-                    clearEntities(world);
-                }
+            long currentTime = System.currentTimeMillis();
+
+            // Проверяем и отправляем предупреждения
+            if (currentTime - lastClearTime >= CLEAR_INTERVAL_MILLIS - WARNING_INTERVAL_MILLIS_5MIN
+                    && currentTime - lastWarning5MinTime >= WARNING_INTERVAL_MILLIS_5MIN) {
+                sendWarningToAllPlayers(event.getServer(), "Entity cleanup will start in 5 minutes!");
+                lastWarning5MinTime = currentTime;
+            }
+
+            if (currentTime - lastClearTime >= CLEAR_INTERVAL_MILLIS - WARNING_INTERVAL_MILLIS_1MIN
+                    && currentTime - lastWarning1MinTime >= WARNING_INTERVAL_MILLIS_1MIN) {
+                sendWarningToAllPlayers(event.getServer(), "Entity cleanup will start in 1 minute!");
+                lastWarning1MinTime = currentTime;
+            }
+
+            if (currentTime - lastClearTime >= CLEAR_INTERVAL_MILLIS - WARNING_INTERVAL_MILLIS_5SEC
+                    && currentTime - lastWarning5SecTime >= WARNING_INTERVAL_MILLIS_5SEC) {
+                sendWarningToAllPlayers(event.getServer(), "Entity cleanup will start in 5 seconds!");
+                lastWarning5SecTime = currentTime;
+            }
+
+            // Проверяем, если прошло достаточно времени для очистки
+            if (currentTime - lastClearTime >= CLEAR_INTERVAL_MILLIS) {
+                lastClearTime = currentTime; // Обновляем время последней очистки
+                clearEntitiesInAllWorlds(event.getServer());
             }
         }
     }
 
-    private void sendWarningToPlayers(ServerLevel world, String message) {
+    private void sendWarningToAllPlayers(MinecraftServer server, String message) {
+        for (ServerLevel world : server.getAllLevels()) {
+            sendMessageToPlayers(world, message);
+        }
+    }
+
+    private void sendMessageToPlayers(ServerLevel world, String message) {
         for (ServerPlayer player : world.players()) {
             player.sendSystemMessage(Component.literal(message));
+        }
+    }
+
+    // Метод для очистки сущностей во всех мирах
+    private void clearEntitiesInAllWorlds(MinecraftServer server) {
+        for (ServerLevel world : server.getAllLevels()) {
+            clearEntities(world);
         }
     }
 
     // Метод для очистки сущностей в указанном мире
     private void clearEntities(ServerLevel world) {
         // Создаем список для хранения сущностей, которые нужно удалить
-        java.util.List<Entity> entitiesToRemove = new ArrayList<>();
+        List<Entity> entitiesToRemove = new ArrayList<>();
 
         // Перебираем все сущности в мире
         for (Entity entity : world.getAllEntities()) {
-            // Проверяем, если тип сущности не в чёрном списке
-            if (!BLACKLIST.contains(entity.getType())) {
+            // Проверяем, если тип сущности не в чёрном списке и максимальное здоровье
+            // сущности меньше 60
+            if (!BLACKLIST.contains(entity.getType()) && shouldRemoveEntity(entity)) {
                 entitiesToRemove.add(entity);
                 LOGGER.info("Marked for removal: {} at {}", entity.getName().getString(), entity.blockPosition());
             }
@@ -115,4 +124,21 @@ public class ServerUtils {
         }
     }
 
+    // Метод для проверки, нужно ли удалять сущность на основе её максимального
+    // здоровья и наличия имени
+    private boolean shouldRemoveEntity(Entity entity) {
+        if (entity instanceof LivingEntity livingEntity) {
+            // Проверяем, если сущность имеет имя (например, бирка с именем)
+            if (livingEntity.hasCustomName()) {
+                return false; // Не удаляем сущность, если у неё есть имя
+            }
+
+            // Получаем максимальное здоровье сущности
+            float maxHealth = livingEntity.getMaxHealth();
+            return maxHealth < 60.0F; // Возвращаем true, если максимальное здоровье меньше 60
+        }
+
+        // Возвращаем true для не-живых сущностей (они не имеют здоровья)
+        return true;
+    }
 }
